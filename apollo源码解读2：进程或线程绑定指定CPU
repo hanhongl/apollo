@@ -1,0 +1,188 @@
+1.简介
+
+CPU绑定指的是在多CPU的系统中将进程或线程绑定到指定的CPU核上去执行。在Linux中，我们可以利用CPU affinity属性把进程绑定到一个或多个CPU核上。
+
+CPU Affinity是进程的一个属性，这个属性指明了进程调度器能够把这个进程调度到哪些CPU上。 该属性要求进程在某个指定的 CPU 上尽量长时间地运行而不被迁移到其他处理器。
+
+CPU Affinity分为2种：soft affinity和hard affinity。soft affinity只是一个建议，如果不可避免，调度器还是会把进程调度到其它的CPU上去执行；hard affinity则是调度器必须遵守的规则， 2.6 以上版本的 Linux 内核可以让开发人员可以编程实现hard affinity 。
+
+2.使用hard affinity的意义
+
+提高CPU缓存命中率CPU之间是不共享缓存的，如果进程频繁地在多个CPU之间切换，则会使旧CPU的cache失效，失去了利用 CPU 缓存的优势。如果进程只在某个CPU上执行，可以避免进程在一个CPU上停止执行，然后在不同的CPU上重新执行时发生的缓存无效而引起的性能成本。
+
+适合对时间敏感的应用在实时性要求高应用中，我们可以把重要的系统进程绑定到指定的CPU上，把应用进程绑定到其余的CPU上。这种做法确保对时间敏感的应用程序可以得到运行，同时可以允许其他应用程序使用其余的计算资源。
+
+3.输出绑定信息，直接上代码吧
+
+//编译指令：g++ main.cpp -lpthread -std=c++17
+//运行指令：./a.out
+//显示线程运行所在CPU
+#include <iostream>
+#include <thread>
+#include <sched.h>
+ 
+using namespace std;
+ 
+void fun(int a)
+{
+  while (1)
+  {
+    //获知当前进程运行在哪个CPU(感觉应该是线程，实验测试一个进程两个线程很结果不一样)
+    int cpuid = sched_getcpu();
+    std::cout << a << "---cpuid : " << cpuid << std::endl;
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+  }
+}
+ 
+int main(int argc, char *argv[])
+{
+  std::thread t1(fun, 1);
+  std::thread t2(fun, 2);
+  t1.join();
+  t2.join();
+ 
+  return 0;
+}
+
+4.进程与CPU绑定，使用liunx下的API:sched_setaffinity和sched_getaffinity
+
+//编译指令：g++ main.cpp -lpthread -std=c++17
+//运行指令：./a.out
+//进程与CPU的绑定
+#include <sched.h>
+#include <unistd.h>
+#include <sys/types.h>
+#include <sys/wait.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <iostream>
+#include <thread>
+ 
+using namespace std;
+ 
+void fun2(std::string str, std::string str2)
+{
+  while (1)
+  {
+    int cpuid = sched_getcpu();
+    std::cout << str << "  " << str2 << "---cpuid : " << cpuid << std::endl;
+    std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+  }
+}
+ 
+void fun1(std::string str)
+{
+  std::thread t1(fun2, str, "thread1");
+  std::thread t2(fun2, str, "thread2");
+  t1.join();
+  t2.join();
+}
+ 
+int main(int argc, char *argv[])
+{
+  int parentCPU, childCPU;
+  int j;
+  int cpu_num = -1;
+  if (argc != 3)
+  {
+    fprintf(stderr, "Usage: %s parent-cpu child-cpu\n", argv[0]);
+    exit(EXIT_FAILURE);
+  }
+  parentCPU = atoi(argv[1]);
+  childCPU = atoi(argv[2]);
+ 
+  cpu_set_t set;
+  CPU_ZERO(&set);
+  switch (fork())
+  {
+  case -1:
+  {
+    /* Error */
+    fprintf(stderr, "fork error\n");
+    exit(EXIT_FAILURE);
+  }
+  case 0:
+  {
+    /* Child */
+    CPU_SET(childCPU, &set);
+    if (sched_setaffinity(getpid(), sizeof(set), &set) == -1)
+    {
+      fprintf(stderr, "child sched_setaffinity error\n");
+      exit(EXIT_FAILURE);
+    }
+ 
+    fun1("child process");
+    exit(EXIT_SUCCESS);
+  }
+  default:
+  {
+    /* Parent */
+    CPU_SET(parentCPU, &set);
+    if (sched_setaffinity(getpid(), sizeof(set), &set) == -1)
+    {
+      fprintf(stderr, "parent sched_setaffinity error\n");
+      exit(EXIT_FAILURE);
+    }
+    fun1("Parent process");
+    wait(NULL); /* Wait for child to terminate */
+    exit(EXIT_SUCCESS);
+  }
+  }
+ 
+  return 0;
+}
+
+5.线程与CPU绑定，使用liunx下的API:pthread_setaffinity_np和pthread_getaffinity_np
+
+//编译指令：g++ main.cpp -lpthread -std=c++17
+//运行指令：./a.out
+//线程与CPU的绑定
+#include <iostream>
+#include <thread>
+#include <sched.h>
+#include <unistd.h>
+using namespace std;
+ 
+int cpu_num = 0;
+ 
+void fun(int p_cpuid)
+{
+  cpu_set_t set;
+  CPU_ZERO(&set);
+  CPU_SET(p_cpuid, &set);
+  pthread_setaffinity_np(pthread_self(), sizeof(set), &set);
+  while (1)
+  {
+    int cpuid = sched_getcpu();
+ 
+    int curcpu = -1;
+    cpu_set_t cpuset;
+    CPU_ZERO(&cpuset);
+    pthread_getaffinity_np(pthread_self(), sizeof(cpuset), &cpuset);
+    for (int j = 0; j < cpu_num; j++)
+    {
+      if (CPU_ISSET(j, &cpuset))
+      {
+        curcpu = j;
+      }
+    }
+    std::cout << pthread_self() << " sched_getcpu : " << cpuid << " pthread_getaffinity_np : " << curcpu << std::endl;
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+  }
+}
+ 
+int main(int argc, char *argv[])
+{
+  cpu_num = sysconf(_SC_NPROCESSORS_CONF);
+  std::thread t1(fun, 5);
+  std::thread t2(fun, 6);
+  t1.join();
+  t2.join();
+ 
+  return 0;
+}
+
+6.用taskset命令实现CPU绑定
+————————————————
+版权声明：本文为CSDN博主「H-KING」的原创文章，遵循CC 4.0 BY-SA版权协议，转载请附上原文出处链接及本声明。
+原文链接：https://blog.csdn.net/liujiayu2/article/details/124886720
